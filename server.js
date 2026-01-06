@@ -1,13 +1,11 @@
 const express = require('express');
-const { spawn } = require('child_process');
-const fs = require('fs');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const path = require('path');
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());

@@ -25,7 +25,7 @@ let currentChunkIndex = 0;
 let isPlaying = false;
 let chunkCache = new Map(); // Index -> BlobURL
 const PREFETCH_COUNT = 4; // Number of chunks to prefetch ahead
-const API_BASE = 'http://localhost:3001/api';
+const API_BASE = '/api';
 
 // Sync speed for both players
 function applySpeed() {
