@@ -155,7 +155,23 @@ function navigateToChapter(direction) {
 }
 
 async function fetchChunk(index) {
-    if (index >= chunks.length || chunkCache.has(index)) return chunkCache.get(index);
+    if (index >= chunks.length) return null;
+
+    if (chunkCache.has(index)) {
+        const cached = chunkCache.get(index);
+        if (cached === 'fetching') {
+            // Wait for existing fetch to complete
+            let retries = 0;
+            while (chunkCache.get(index) === 'fetching' && retries < 100) { // 10s max wait
+                await new Promise(r => setTimeout(r, 100));
+                retries++;
+            }
+            // Return result (or null if it failed/timeout)
+            const result = chunkCache.get(index);
+            return result === 'fetching' ? null : result;
+        }
+        return cached;
+    }
 
     // Mark as fetching to avoid duplicate requests
     chunkCache.set(index, 'fetching');
