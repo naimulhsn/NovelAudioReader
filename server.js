@@ -4,6 +4,8 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const path = require('path');
 
+const { chromium } = require('playwright');
+
 const app = express();
 const port = process.env.PORT || 3001;
 
@@ -201,6 +203,16 @@ app.post('/api/fetch-novel', async (req, res) => {
         const fullText = paragraphs.join('\n\n');
 
         if (!fullText || fullText.length < 50) {
+            console.log('Standard fetch failed or returned little content. Switching to Playwright...');
+            try {
+                const pwText = await fetchWithPlaywright(url, selector);
+                if (pwText && pwText.length > 50) {
+                    return res.json({ text: pwText });
+                }
+            } catch (pwError) {
+                console.error('Playwright attempt failed:', pwError.message);
+            }
+
             return res.status(404).json({ error: 'Could not find readable content. The site might be JS-heavy or protected.' });
         }
 
@@ -211,6 +223,117 @@ app.post('/api/fetch-novel', async (req, res) => {
         res.status(500).json({ error: `Failed to fetch: ${error.message}` });
     }
 });
+
+// Helper function for Playwright
+async function fetchWithPlaywright(url, selector) {
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport: { width: 1280, height: 720 }
+        });
+        const page = await context.newPage();
+
+        console.log(`[Playwright] Navigating to ${url}`);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+        // Common popup handling (optional, add more as discovered)
+        try {
+            // Example: wait for a bit to let dynamics settle
+            await page.waitForTimeout(2000);
+        } catch (e) { }
+
+        const targetSelectors = selector ? [selector] : [
+            '#reader-container',
+            '.chapter-content',
+            '#chapter-content',
+            '.read-container',
+            '#content',
+            '.entry-content',
+            'main article',
+            '.prose' // Tailwind prose
+        ];
+
+        // Try to find one of the selectors
+        let content = '';
+        const foundSelector = await page.evaluate((selectors) => {
+            for (const sel of selectors) {
+                if (document.querySelector(sel)) return sel;
+            }
+            return null;
+        }, targetSelectors);
+
+        if (foundSelector) {
+            console.log(`[Playwright] Found content with selector: ${foundSelector}`);
+            content = await page.evaluate((sel) => {
+                const el = document.querySelector(sel);
+                // Basic cleanup
+                const clones = el.cloneNode(true);
+                clones.querySelectorAll('script, style, ins, .ads, #ads, footer, nav').forEach(x => x.remove());
+
+                // Get all relevant text elements (p, div, maybe h tags if they contain the start)
+                const paragraphs = Array.from(clones.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6'));
+
+                const result = [];
+                let capturing = false;
+
+                // Regex to find "Chapter X" or similar starts
+                // It matches "Chapter" followed by digits, optionally followed by colon or title
+                const startRegex = /^(Chapter\s+\d+|Episode\s+\d+)/i;
+
+                // First pass: check if we find the start pattern
+                const hasStartPattern = paragraphs.some(p => startRegex.test(p.innerText.trim()));
+
+                for (const p of paragraphs) {
+                    const text = p.innerText.trim();
+                    if (!text) continue;
+
+                    if (hasStartPattern) {
+                        if (!capturing && startRegex.test(text)) {
+                            capturing = true;
+                            // Optionally skip the title line itself if "after" is strictly implied
+                            // For now, let's include it but maybe the user wants to strip it.
+                            // "take the texts that comes after the line that has 'Chapter X:'"
+                            // implies SKIPPING the line.
+                            continue;
+                        }
+                        if (capturing) {
+                            result.push(text);
+                        }
+                    } else {
+                        // If no "Chapter X" found, fallback to collecting everything reasonably long
+                        if (text.length > 20) result.push(text);
+                    }
+                }
+
+                // Fallback if result is empty despite having paragraphs (maybe capture failed)
+                if (result.length === 0 && paragraphs.length > 0) {
+                    return paragraphs
+                        .map(p => p.innerText.trim())
+                        .filter(t => t.length > 20)
+                        .join('\n');
+                }
+
+                return result.join('\n');
+            }, foundSelector);
+        } else {
+            console.log('[Playwright] No specific selector found, grabbing all paragraphs...');
+            content = await page.evaluate(() => {
+                return Array.from(document.querySelectorAll('p'))
+                    .map(p => p.innerText.trim())
+                    .filter(t => t.length > 40)
+                    .join('\n');
+            });
+        }
+
+        return content;
+    } catch (e) {
+        throw e;
+    } finally {
+        if (browser) await browser.close();
+    }
+}
 
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);

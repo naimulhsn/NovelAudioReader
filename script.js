@@ -103,6 +103,15 @@ async function fetchNovelContent(url) {
 
     const selector = document.getElementById('customSelector').value.trim();
 
+    // Stop audio immediately when starting a fetch
+    if (isPlaying) {
+        audioA.pause();
+        audioB.pause();
+        isPlaying = false;
+        playIcon.classList.remove('hidden');
+        pauseIcon.classList.add('hidden');
+    }
+
     // Show loading in button 
     fetchBtn.classList.add('animate-pulse', 'text-indigo-600');
 
