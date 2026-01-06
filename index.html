@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Novel Reader - Premium TTS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=Outfit:wght@400;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="text-slate-200 p-4 md:p-8 flex flex-col items-center">
+    <div class="max-w-4xl w-full flex flex-col gap-6">
+        <!-- Header -->
+        <header class="flex flex-col items-center text-center space-y-2">
+            <h1
+                class="text-4xl md:text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
+                Novel Reader
+            </h1>
+            <p class="text-slate-400 font-light italic">Paste your story and let it come alive.</p>
+        </header>
+
+        <!-- URL/Navigation Bar -->
+        <div class="url-bar group">
+            <button id="prevBtn" class="nav-btn" title="Previous Chapter">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                </svg>
+            </button>
+            <input type="text" id="novelUrl" placeholder="Enter webnovel chapter URL (e.g. wetriedtls chapter link)"
+                class="url-input">
+            <button id="fetchBtn" class="nav-btn text-indigo-400 hover:text-indigo-300" title="Fetch Content">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+            </button>
+            <button id="nextBtn" class="nav-btn" title="Next Chapter">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- Advanced Settings -->
+        <div class="flex flex-col gap-2">
+            <button id="toggleAdvanced"
+                class="text-xs text-slate-500 hover:text-indigo-400 transition-colors w-max flex items-center gap-1 ml-2">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Advanced Options
+            </button>
+            <div id="advancedPanel" class="hidden glass p-4 rounded-xl flex flex-col gap-3">
+                <div class="flex flex-col gap-1">
+                    <label class="text-[10px] uppercase tracking-wider text-slate-500 font-bold ml-1">Custom CSS
+                        Selector</label>
+                    <input type="text" id="customSelector" placeholder="Optional: e.g. .chapter-body or #content"
+                        class="bg-slate-900/50 border border-white/5 rounded-lg px-3 py-2 text-sm text-slate-300 outline-none focus:border-indigo-500/50 transition-all">
+                    <p class="text-[10px] text-slate-600 ml-1">Leave blank to use smart defaults. Use this if the
+                        automatic fetch fails.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Input -->
+        <div class="relative group">
+            <textarea id="novelText" placeholder="Paste your novel's text here..."
+                class="w-full h-80 md:h-[500px] p-6 glass rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all text-lg leading-relaxed custom-scrollbar resize-none placeholder-slate-600"></textarea>
+
+            <div id="readerView"
+                class="hidden w-full h-80 md:h-[500px] p-6 glass rounded-2xl outline-none text-lg leading-relaxed custom-scrollbar overflow-y-auto reader-view">
+                <!-- Spans injected here -->
+            </div>
+
+            <div
+                class="absolute inset-0 rounded-2xl pointer-events-none border border-indigo-500/20 group-focus-within:border-indigo-500/50 transition-colors">
+            </div>
+        </div>
+
+        <!-- Controls Container -->
+        <div class="glass p-6 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-6">
+            <!-- Playback Controls -->
+            <div class="flex items-center gap-4">
+                <button id="playBtn"
+                    class="bg-indigo-600 hover:bg-indigo-500 text-white p-4 rounded-full transition-transform active:scale-95 flex items-center justify-center min-w-[56px] min-h-[56px]">
+                    <svg id="playIcon" class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                    </svg>
+                    <svg id="pauseIcon" class="w-6 h-6 hidden" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                    </svg>
+                    <svg id="loadingIcon" class="w-6 h-6 hidden animate-spin" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor" stroke-width="2">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4">
+                        </circle>
+                        <path class="opacity-75" fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+                        </path>
+                    </svg>
+                </button>
+                <button id="stopBtn"
+                    class="bg-slate-700 hover:bg-slate-600 text-white p-4 rounded-full transition-transform active:scale-95 flex items-center justify-center">
+                    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 6h12v12H6z" />
+                    </svg>
+                </button>
+
+                <div class="h-10 w-px bg-slate-700 mx-2"></div>
+
+                <select id="speedSelect"
+                    class="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 outline-none focus:ring-1 focus:ring-indigo-500 w-[80px]">
+                    <option value="0.8">0.8x</option>
+                    <option value="0.9">0.9x</option>
+                    <option value="1" selected>1.0x</option>
+                    <option value="1.1">1.1x</option>
+                    <option value="1.2">1.2x</option>
+                    <option value="1.3">1.3x</option>
+                    <option value="1.4">1.4x</option>
+                    <option value="1.5">1.5x</option>
+                    <option value="1.6">1.6x</option>
+                    <option value="1.7">1.7x</option>
+                    <option value="1.8">1.8x</option>
+                    <option value="1.9">1.9x</option>
+                    <option value="2">2.0x</option>
+                </select>
+
+                <select id="voiceSelect"
+                    class="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 outline-none focus:ring-1 focus:ring-indigo-500 max-w-[150px] md:max-w-[200px]">
+                    <!-- Voices populated by JS -->
+                </select>
+            </div>
+
+            <!-- Progress Info -->
+            <div class="flex flex-col flex-1 w-full md:w-auto">
+                <div class="flex justify-between items-center mb-2">
+                    <span id="progressText" class="text-xs font-medium text-slate-400">Not started</span>
+                    <span id="percentageText" class="text-xs font-bold text-indigo-400">0%</span>
+                </div>
+                <div class="w-full bg-slate-800/50 h-2 rounded-full overflow-hidden">
+                    <div id="progressBar" class="bg-indigo-500 h-full w-0 transition-all duration-300 progress-glow">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

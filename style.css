@@ -1,0 +1,116 @@
+body {
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+    min-height: 100vh;
+}
+
+h1 {
+    font-family: 'Outfit', sans-serif;
+}
+
+.glass {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.progress-glow {
+    box-shadow: 0 0 15px rgba(99, 102, 241, 0.5);
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.animate-spin {
+    animation: spin 1s linear infinite;
+}
+
+.chunk {
+    transition: all 0.4s ease;
+    padding: 2px 4px;
+    border-radius: 6px;
+    display: inline-block;
+    margin-bottom: 4px;
+    cursor: pointer;
+}
+
+.chunk.highlight {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.3) 0%, rgba(34, 211, 238, 0.3) 100%);
+    color: #fff;
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+    transform: scale(1.02);
+    position: relative;
+    z-index: 10;
+}
+
+.reader-view {
+    scrollbar-gutter: stable;
+    scroll-behavior: smooth;
+}
+
+.url-bar {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.3s ease;
+}
+
+.url-bar:focus-within {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(99, 102, 241, 0.4);
+    box-shadow: 0 0 15px rgba(99, 102, 241, 0.1);
+}
+
+.nav-btn {
+    padding: 8px;
+    border-radius: 8px;
+    color: #94a3b8;
+    transition: all 0.2s ease;
+}
+
+.nav-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.nav-btn:active {
+    transform: scale(0.95);
+}
+
+.url-input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #e2e8f0;
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 0.875rem;
+}
