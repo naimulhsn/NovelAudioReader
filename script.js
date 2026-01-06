@@ -24,6 +24,7 @@ let chunks = [];
 let currentChunkIndex = 0;
 let isPlaying = false;
 let chunkCache = new Map(); // Index -> BlobURL
+let fetchPromises = new Map(); // Index -> Promise<BlobUrl>
 const PREFETCH_COUNT = 4; // Number of chunks to prefetch ahead
 const API_BASE = '/api';
 
@@ -157,52 +158,44 @@ function navigateToChapter(direction) {
 async function fetchChunk(index) {
     if (index >= chunks.length) return null;
 
-    if (chunkCache.has(index)) {
-        const cached = chunkCache.get(index);
-        if (cached === 'fetching') {
-            // Wait for existing fetch to complete
-            let retries = 0;
-            while (chunkCache.get(index) === 'fetching' && retries < 100) { // 10s max wait
-                await new Promise(r => setTimeout(r, 100));
-                retries++;
-            }
-            // Return result (or null if it failed/timeout)
-            const result = chunkCache.get(index);
-            return result === 'fetching' ? null : result;
-        }
-        return cached;
-    }
+    // 1. Check completed cache
+    if (chunkCache.has(index)) return chunkCache.get(index);
 
-    // Mark as fetching to avoid duplicate requests
-    chunkCache.set(index, 'fetching');
+    // 2. Check ongoing request
+    if (fetchPromises.has(index)) return await fetchPromises.get(index);
 
-    try {
+    // 3. Start new request
+    const fetchOp = (async () => {
         const text = chunks[index];
         const voice = voiceSelect.value;
-        const response = await fetch(`${API_BASE}/tts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, voice })
-        });
+        try {
+            const response = await fetch(`${API_BASE}/tts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, voice })
+            });
 
-        if (!response.ok) throw new Error('TTS fetch failed');
+            if (!response.ok) throw new Error('TTS fetch failed');
 
-        const blob = await response.blob();
+            const blob = await response.blob();
 
-        // Check if voice changed while fetching
-        if (voiceSelect.value !== voice) {
+            // Check stale voice
+            if (voiceSelect.value !== voice) return null;
+
+            const url = URL.createObjectURL(blob);
+            chunkCache.set(index, url);
+            return url;
+        } catch (error) {
+            console.error(`Error fetching chunk ${index}:`, error);
+            // Don't auto-retry recursively here to avoid spam, just return null
             return null;
+        } finally {
+            fetchPromises.delete(index);
         }
+    })();
 
-        const url = URL.createObjectURL(blob);
-        chunkCache.set(index, url);
-        return url;
-    } catch (error) {
-        if (voiceSelect.value !== voice) return null;
-        console.error(`Error fetching chunk ${index}:`, error);
-        chunkCache.delete(index);
-        return null;
-    }
+    fetchPromises.set(index, fetchOp);
+    return await fetchOp;
 }
 
 async function prefetchNext() {
@@ -247,8 +240,8 @@ async function playChunk() {
 
         let url = chunkCache.get(currentChunkIndex);
 
-        // If not in cache or still fetching, we must wait/fetch
-        if (!url || url === 'fetching') {
+        // If not in cache, must fetch
+        if (!url) {
             playIcon.classList.add('hidden');
             pauseIcon.classList.add('hidden');
             loadingIcon.classList.remove('hidden');
@@ -265,28 +258,25 @@ async function playChunk() {
         if (!isPlaying) return; // User might have paused while fetching
 
         // PING-PONG LOGIC
-        // If the current URL is already loaded in the standby player, swap instantly
-        // If not (first play, or jump), load it into the active player
-
         let targetAudio = activeAudio;
         const inactiveAudio = activeAudio === audioA ? audioB : audioA;
 
         if (inactiveAudio.src === url) {
-            // Hot swap! The inactive player was already preloaded with this chunk
+            // Hot swap!
             targetAudio = inactiveAudio;
             activeAudio = targetAudio; // Swap global reference
         } else {
-            // Cold start or jump: load into current active player
+            // Cold start or jump
             targetAudio.src = url;
+            targetAudio.load(); // Ensure new src is acknowledged
         }
 
-        applySpeed(); // Ensure rate is correct before play
+        applySpeed();
 
         try {
             await targetAudio.play();
         } catch (e) {
             console.warn("Autoplay blocked or playback error, retrying", e);
-            // Fallback for edge cases
             targetAudio.src = url;
             await targetAudio.play();
         }
@@ -294,13 +284,15 @@ async function playChunk() {
         loadingIcon.classList.add('hidden');
         pauseIcon.classList.remove('hidden');
 
-        // Start prefetching next chunks (and priming the now-inactive player)
+        // Start prefetching next chunks
         prefetchNext();
 
     } catch (error) {
         console.error('Playback error:', error);
         if (isPlaying) {
-            currentChunkIndex++;
+            console.log("Retrying current chunk in 2s...");
+            // DO NOT SKIP. Retry the same chunk.
+            await new Promise(r => setTimeout(r, 2000));
             playChunk();
         }
     }
