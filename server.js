@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
+// const axios = require('axios'); // Removed
 const cheerio = require('cheerio');
 const path = require('path');
 
-const { chromium } = require('playwright');
+// const { chromium } = require('playwright'); // Removed
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -123,15 +123,24 @@ app.post('/api/fetch-novel', async (req, res) => {
 
     try {
         console.log(`Fetching novel from: ${url}`);
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
-            },
-            timeout: 10000
+
+        // Dynamic import for got-scraping (ESM only package)
+        const { gotScraping } = await import('got-scraping');
+
+        const response = await gotScraping({
+            url,
+            headerGeneratorOptions: {
+                browsers: [
+                    { name: 'chrome', minVersion: 120 },
+                    { name: 'firefox', minVersion: 120 }
+                ],
+                devices: ['desktop'],
+                locales: ['en-US'],
+                operatingSystems: ['windows', 'linux'],
+            }
         });
 
-        const html = response.data;
+        const html = response.body;
         const $ = cheerio.load(html);
 
         // EXTRACTION STRATEGY 1: JSON Data (for Next.js/heavy JS sites)
@@ -172,14 +181,16 @@ app.post('/api/fetch-novel', async (req, res) => {
             '.read-container',
             '#content',
             '.entry-content',
-            'main article'
+            'main article',
+            '.prose',
+            '.text-content'
         ];
 
         let foundContent = false;
         for (const sel of targetSelectors) {
             const container = $(sel);
             if (container.length > 0) {
-                container.find('p, div').each((i, el) => {
+                container.find('p, div, h1, h2, h3').each((i, el) => {
                     const text = $(el).text().trim();
                     if (text.length > 10) paragraphs.push(text);
                 });
@@ -203,17 +214,49 @@ app.post('/api/fetch-novel', async (req, res) => {
         const fullText = paragraphs.join('\n\n');
 
         if (!fullText || fullText.length < 50) {
-            console.log('Standard fetch failed or returned little content. Switching to Playwright...');
+            console.log('Standard fetch failed. Attempting lightweight CSR bypass via Jina AI...');
+
             try {
-                const pwText = await fetchWithPlaywright(url, selector);
-                if (pwText && pwText.length > 50) {
-                    return res.json({ text: pwText });
+                // Jina AI (r.jina.ai) renders JS and returns Markdown
+                // This offloads the browser rendering to their servers
+                const jinaUrl = `https://r.jina.ai/${url}`;
+                const jinaResponse = await gotScraping({
+                    url: jinaUrl,
+                    headerGeneratorOptions: {
+                        browsers: [{ name: 'chrome', minVersion: 120 }],
+                        devices: ['desktop'],
+                        locales: ['en-US'],
+                        operatingSystems: ['windows'],
+                    }
+                });
+
+                const jinaText = jinaResponse.body;
+
+                // Jina returns Markdown. heavily simplify it to just text
+                // Remove links, images, etc? Or just return as is?
+                // The current frontend expects "text".
+                // Let's do some basic cleanup of the markdown to plain text if possible,
+                // or just return the markdown if it's readable.
+
+                // Simple cleanup regex for markdown links/images to text
+                const cleanText = jinaText
+                    .replace(/!\[.*?\]\(.*?\)/g, '') // Remove images
+                    .replace(/\[([^\]]+)\]\(.*?\)/g, '$1') // Keep link text
+                    .replace(/#{1,6}\s?/g, '') // Remove headers
+                    .replace(/\*\*/g, '') // Remove bold
+                    .replace(/\*/g, '') // Remove italic
+                    .trim();
+
+                if (cleanText.length > 50) {
+                    console.log('Successfully fetched content via Jina AI');
+                    return res.json({ text: cleanText });
                 }
-            } catch (pwError) {
-                console.error('Playwright attempt failed:', pwError.message);
+
+            } catch (jinaError) {
+                console.error('Jina AI fallback failed:', jinaError.message);
             }
 
-            return res.status(404).json({ error: 'Could not find readable content. The site might be JS-heavy or protected.' });
+            return res.status(404).json({ error: 'Could not find readable content. The site is likely a complex SPA prevented from scraping.' });
         }
 
         res.json({ text: fullText });
@@ -223,117 +266,6 @@ app.post('/api/fetch-novel', async (req, res) => {
         res.status(500).json({ error: `Failed to fetch: ${error.message}` });
     }
 });
-
-// Helper function for Playwright
-async function fetchWithPlaywright(url, selector) {
-    let browser;
-    try {
-        browser = await chromium.launch({ headless: true });
-        const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport: { width: 1280, height: 720 }
-        });
-        const page = await context.newPage();
-
-        console.log(`[Playwright] Navigating to ${url}`);
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-        // Common popup handling (optional, add more as discovered)
-        try {
-            // Example: wait for a bit to let dynamics settle
-            await page.waitForTimeout(2000);
-        } catch (e) { }
-
-        const targetSelectors = selector ? [selector] : [
-            '#reader-container',
-            '.chapter-content',
-            '#chapter-content',
-            '.read-container',
-            '#content',
-            '.entry-content',
-            'main article',
-            '.prose' // Tailwind prose
-        ];
-
-        // Try to find one of the selectors
-        let content = '';
-        const foundSelector = await page.evaluate((selectors) => {
-            for (const sel of selectors) {
-                if (document.querySelector(sel)) return sel;
-            }
-            return null;
-        }, targetSelectors);
-
-        if (foundSelector) {
-            console.log(`[Playwright] Found content with selector: ${foundSelector}`);
-            content = await page.evaluate((sel) => {
-                const el = document.querySelector(sel);
-                // Basic cleanup
-                const clones = el.cloneNode(true);
-                clones.querySelectorAll('script, style, ins, .ads, #ads, footer, nav').forEach(x => x.remove());
-
-                // Get all relevant text elements (p, div, maybe h tags if they contain the start)
-                const paragraphs = Array.from(clones.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6'));
-
-                const result = [];
-                let capturing = false;
-
-                // Regex to find "Chapter X" or similar starts
-                // It matches "Chapter" followed by digits, optionally followed by colon or title
-                const startRegex = /^(Chapter\s+\d+|Episode\s+\d+)/i;
-
-                // First pass: check if we find the start pattern
-                const hasStartPattern = paragraphs.some(p => startRegex.test(p.innerText.trim()));
-
-                for (const p of paragraphs) {
-                    const text = p.innerText.trim();
-                    if (!text) continue;
-
-                    if (hasStartPattern) {
-                        if (!capturing && startRegex.test(text)) {
-                            capturing = true;
-                            // Optionally skip the title line itself if "after" is strictly implied
-                            // For now, let's include it but maybe the user wants to strip it.
-                            // "take the texts that comes after the line that has 'Chapter X:'"
-                            // implies SKIPPING the line.
-                            continue;
-                        }
-                        if (capturing) {
-                            result.push(text);
-                        }
-                    } else {
-                        // If no "Chapter X" found, fallback to collecting everything reasonably long
-                        if (text.length > 20) result.push(text);
-                    }
-                }
-
-                // Fallback if result is empty despite having paragraphs (maybe capture failed)
-                if (result.length === 0 && paragraphs.length > 0) {
-                    return paragraphs
-                        .map(p => p.innerText.trim())
-                        .filter(t => t.length > 20)
-                        .join('\n');
-                }
-
-                return result.join('\n');
-            }, foundSelector);
-        } else {
-            console.log('[Playwright] No specific selector found, grabbing all paragraphs...');
-            content = await page.evaluate(() => {
-                return Array.from(document.querySelectorAll('p'))
-                    .map(p => p.innerText.trim())
-                    .filter(t => t.length > 40)
-                    .join('\n');
-            });
-        }
-
-        return content;
-    } catch (e) {
-        throw e;
-    } finally {
-        if (browser) await browser.close();
-    }
-}
 
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
