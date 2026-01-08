@@ -113,6 +113,35 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
+
+/* Helper to clean novel text based on known patterns */
+function cleanNovelText(text) {
+    if (!text) return "";
+
+    // 1. Find Start: "Chapter <number>:"
+    // Matches "Chapter 139: ", "Chapter 139:", etc.
+    const startPattern = /Chapter\s+\d+\s*:/i;
+    const startMatch = text.match(startPattern);
+
+    let processed = text;
+    if (startMatch) {
+        processed = text.substring(startMatch.index);
+    }
+
+    // 2. Find End: "Translator Notes:" or "[]"
+    const endMarkers = ["Translator Notes:", "[]"];
+    let cutoffIndex = processed.length;
+
+    for (const marker of endMarkers) {
+        const idx = processed.indexOf(marker);
+        if (idx !== -1 && idx < cutoffIndex) {
+            cutoffIndex = idx;
+        }
+    }
+
+    return processed.substring(0, cutoffIndex).trim();
+}
+
 // Fetch novel content from URL
 app.post('/api/fetch-novel', async (req, res) => {
     const { url, selector } = req.body;
@@ -161,7 +190,7 @@ app.post('/api/fetch-novel', async (req, res) => {
                             if (t.length > 20) jsonParagraphs.push(t);
                         });
                         if (jsonParagraphs.length > 0) {
-                            return res.json({ text: jsonParagraphs.join('\n\n') });
+                            return res.json({ text: cleanNovelText(jsonParagraphs.join('\n\n')) });
                         }
                     }
                 }
@@ -249,7 +278,7 @@ app.post('/api/fetch-novel', async (req, res) => {
 
                 if (cleanText.length > 50) {
                     console.log('Successfully fetched content via Jina AI');
-                    return res.json({ text: cleanText });
+                    return res.json({ text: cleanNovelText(cleanText) });
                 }
 
             } catch (jinaError) {
@@ -259,7 +288,7 @@ app.post('/api/fetch-novel', async (req, res) => {
             return res.status(404).json({ error: 'Could not find readable content. The site is likely a complex SPA prevented from scraping.' });
         }
 
-        res.json({ text: fullText });
+        res.json({ text: cleanNovelText(fullText) });
 
     } catch (error) {
         console.error('Fetch Error:', error.message);
