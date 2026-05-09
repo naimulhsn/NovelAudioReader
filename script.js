@@ -1,70 +1,487 @@
+// ============================================
+// Text-to-Speech Player — Core Engine
+// ============================================
+
+// --- DOM Elements ---
 const novelTextElem = document.getElementById('novelText');
 const readerView = document.getElementById('readerView');
-const novelUrlInput = document.getElementById('novelUrl');
-const prevBtn = document.getElementById('prevBtn');
-const nextBtn = document.getElementById('nextBtn');
-const fetchBtn = document.getElementById('fetchBtn');
+const textAreaWrapper = document.getElementById('textAreaWrapper');
+const textActions = document.getElementById('textActions');
+const pasteBtn = document.getElementById('pasteBtn');
+const clearBtn = document.getElementById('clearBtn');
 const playBtn = document.getElementById('playBtn');
 const playIcon = document.getElementById('playIcon');
 const pauseIcon = document.getElementById('pauseIcon');
 const loadingIcon = document.getElementById('loadingIcon');
 const stopBtn = document.getElementById('stopBtn');
+const skipBackBtn = document.getElementById('skipBackBtn');
+const skipForwardBtn = document.getElementById('skipForwardBtn');
 const voiceSelect = document.getElementById('voiceSelect');
 const speedSelect = document.getElementById('speedSelect');
-const progressBar = document.getElementById('progressBar');
+const autoScrollToggle = document.getElementById('autoScrollToggle');
 const progressText = document.getElementById('progressText');
-const percentageText = document.getElementById('percentageText');
+const progressBarFill = document.getElementById('progressBarFill');
 
-// Ping-pong audio players
-const audioA = new Audio();
-const audioB = new Audio();
-let activeAudio = audioA; // Track which audio is currently "main"
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsModal = document.getElementById('settingsModal');
+const modalCloseBtn = document.getElementById('modalCloseBtn');
+const modalScrollToggle = document.getElementById('modalScrollToggle');
+const modalSpeedSelect = document.getElementById('modalSpeedSelect');
+const modalVoiceSelect = document.getElementById('modalVoiceSelect');
+const textSizeRange = document.getElementById('textSizeRange');
+const textColorPicker = document.getElementById('textColorPicker');
+const textOpacityRange = document.getElementById('textOpacityRange');
 
+// --- Constants ---
+const API_BASE = '/api';
+const MAX_CHUNK_LENGTH = 500;
+const PREFETCH_AHEAD = 2;    // How many chunks to prefetch ahead
+const CACHE_BEHIND = 2;      // How many past chunks to keep in cache
+const MAX_RETRIES = 2;
+
+// --- Single Audio Element (no more ping-pong) ---
+const audio = new Audio();
+
+// --- State ---
 let chunks = [];
 let currentChunkIndex = 0;
 let isPlaying = false;
-let chunkCache = new Map(); // Index -> BlobURL
-let fetchPromises = new Map(); // Index -> Promise<BlobUrl>
-const PREFETCH_COUNT = 4; // Number of chunks to prefetch ahead
-const API_BASE = '/api';
+let isAutoScrollEnabled = true;
+let playbackSessionId = 0; // Incremented on each new play session to invalidate stale callbacks
 
-// Sync speed for both players
-function applySpeed() {
-    const rate = parseFloat(speedSelect.value);
-    audioA.playbackRate = rate;
-    audioB.playbackRate = rate;
+// --- Audio Chunk Manager ---
+const audioMap = new Map();        // chunkIndex → blobURL
+const fetchPromises = new Map();   // chunkIndex → Promise<blobURL|null>
+const abortControllers = new Map(); // chunkIndex → AbortController
+
+// ============================================
+// Utilities
+// ============================================
+
+function splitIntoChunks(text) {
+    if (!text) return [];
+
+    const paragraphs = text.split(/\n+/).filter(p => p.trim().length > 0);
+    const result = [];
+
+    for (let p of paragraphs) {
+        p = p.trim();
+        if (p.length <= MAX_CHUNK_LENGTH) {
+            result.push(p);
+        } else {
+            const sentences = p.match(/[^.!?]+[.!?]+|\s*[^.!?]+$/g) || [p];
+            let currentPart = '';
+
+            for (const sentence of sentences) {
+                if ((currentPart.length + sentence.length) <= MAX_CHUNK_LENGTH) {
+                    currentPart += (currentPart ? ' ' : '') + sentence;
+                } else {
+                    if (currentPart) result.push(currentPart.trim());
+
+                    if (sentence.length > MAX_CHUNK_LENGTH) {
+                        let sub = sentence;
+                        while (sub.length > MAX_CHUNK_LENGTH) {
+                            result.push(sub.substring(0, MAX_CHUNK_LENGTH).trim());
+                            sub = sub.substring(MAX_CHUNK_LENGTH);
+                        }
+                        currentPart = sub;
+                    } else {
+                        currentPart = sentence;
+                    }
+                }
+            }
+            if (currentPart.trim()) result.push(currentPart.trim());
+        }
+    }
+    return result;
 }
 
-speedSelect.addEventListener('change', () => {
-    applySpeed();
-    localStorage.setItem('novelReader_speed', speedSelect.value);
+// ============================================
+// UI State Helpers
+// ============================================
+
+function setPlayButtonState(state) {
+    // state: 'play' | 'pause' | 'loading'
+    playIcon.classList.toggle('hidden', state !== 'play');
+    pauseIcon.classList.toggle('hidden', state !== 'pause');
+    loadingIcon.classList.toggle('hidden', state !== 'loading');
+}
+
+function updateProgress() {
+    if (chunks.length === 0) {
+        progressText.textContent = 'Ready';
+        progressBarFill.style.width = '0%';
+        return;
+    }
+    const current = Math.min(currentChunkIndex + 1, chunks.length);
+    progressText.textContent = `${current} / ${chunks.length}`;
+    progressBarFill.style.width = `${(current / chunks.length) * 100}%`;
+}
+
+function highlightChunk(index) {
+    document.querySelectorAll('.chunk.highlight').forEach(el => el.classList.remove('highlight'));
+
+    // Mark played chunks
+    for (let i = 0; i < index; i++) {
+        const el = document.getElementById(`chunk-${i}`);
+        if (el) el.classList.add('played');
+    }
+
+    const activeSpan = document.getElementById(`chunk-${index}`);
+    if (activeSpan) {
+        activeSpan.classList.remove('played');
+        activeSpan.classList.add('highlight');
+        if (isAutoScrollEnabled) {
+            activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+}
+
+function enterReaderMode() {
+    novelTextElem.classList.add('hidden');
+    textActions.classList.add('hidden');
+    readerView.classList.remove('hidden');
+    readerView.classList.add('custom-scrollbar');
+    readerView.innerHTML = chunks
+        .map((text, i) => `<span id="chunk-${i}" class="chunk" title="Click to jump to this chunk">${text}</span>`)
+        .join('<br><br>');
+}
+
+function exitReaderMode() {
+    readerView.classList.add('hidden');
+    readerView.innerHTML = '';
+    novelTextElem.classList.remove('hidden');
+    textActions.classList.remove('hidden');
+}
+
+// ============================================
+// Cache Management
+// ============================================
+
+function clearAllCache() {
+    // Abort all in-flight fetches
+    abortControllers.forEach(ctrl => ctrl.abort());
+    abortControllers.clear();
+    fetchPromises.clear();
+
+    // Revoke all blob URLs
+    audioMap.forEach(url => URL.revokeObjectURL(url));
+    audioMap.clear();
+}
+
+function evictOldCache() {
+    // Revoke blob URLs for chunks far behind the current position
+    const evictBefore = currentChunkIndex - CACHE_BEHIND;
+    for (const [index, url] of audioMap) {
+        if (index < evictBefore) {
+            URL.revokeObjectURL(url);
+            audioMap.delete(index);
+        }
+    }
+}
+
+// ============================================
+// Fetching Audio
+// ============================================
+
+async function fetchChunkAudio(index, sessionId) {
+    if (index < 0 || index >= chunks.length) return null;
+
+    // Already cached
+    if (audioMap.has(index)) return audioMap.get(index);
+
+    // Already fetching — wait for it
+    if (fetchPromises.has(index)) return await fetchPromises.get(index);
+
+    // Start a new fetch
+    const voice = voiceSelect.value;
+    const controller = new AbortController();
+    abortControllers.set(index, controller);
+
+    const promise = (async () => {
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            // Check if session is still valid
+            if (sessionId !== playbackSessionId) return null;
+
+            try {
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+                const response = await fetch(`${API_BASE}/tts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: chunks[index], voice }),
+                    signal: controller.signal,
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) throw new Error(`TTS status ${response.status}`);
+
+                const blob = await response.blob();
+
+                // Validate session and voice haven't changed
+                if (sessionId !== playbackSessionId || voiceSelect.value !== voice) {
+                    return null;
+                }
+
+                const blobUrl = URL.createObjectURL(blob);
+                audioMap.set(index, blobUrl);
+                return blobUrl;
+            } catch (err) {
+                if (err.name === 'AbortError' || sessionId !== playbackSessionId) return null;
+
+                console.error(`Chunk ${index} fetch attempt ${attempt + 1} failed:`, err.message);
+
+                if (attempt < MAX_RETRIES) {
+                    await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));
+                }
+            }
+        }
+        return null;
+    })();
+
+    fetchPromises.set(index, promise);
+
+    try {
+        return await promise;
+    } finally {
+        fetchPromises.delete(index);
+        abortControllers.delete(index);
+    }
+}
+
+function prefetch(sessionId) {
+    for (let i = 1; i <= PREFETCH_AHEAD; i++) {
+        const idx = currentChunkIndex + i;
+        if (idx < chunks.length && !audioMap.has(idx) && !fetchPromises.has(idx)) {
+            fetchChunkAudio(idx, sessionId);
+        }
+    }
+}
+
+// ============================================
+// Playback Engine
+// ============================================
+
+async function playChunk() {
+    if (!isPlaying) return;
+
+    const sessionId = playbackSessionId;
+
+    if (currentChunkIndex >= chunks.length) {
+        stopReading();
+        return;
+    }
+
+    updateProgress();
+    highlightChunk(currentChunkIndex);
+    evictOldCache();
+
+    // Get audio URL (from cache or fetch)
+    let url = audioMap.get(currentChunkIndex);
+
+    if (!url) {
+        setPlayButtonState('loading');
+        url = await fetchChunkAudio(currentChunkIndex, sessionId);
+
+        // Session invalidated while fetching
+        if (sessionId !== playbackSessionId) return;
+
+        if (!url) {
+            console.error(`Failed to get audio for chunk ${currentChunkIndex}`);
+            // Skip this chunk and try next
+            if (isPlaying) {
+                currentChunkIndex++;
+                playChunk();
+            }
+            return;
+        }
+    }
+
+    if (!isPlaying || sessionId !== playbackSessionId) return;
+
+    // Play the audio
+    try {
+        audio.src = url;
+        audio.playbackRate = parseFloat(speedSelect.value);
+        await audio.play();
+        setPlayButtonState('pause');
+    } catch (err) {
+        console.warn('Playback error, retrying:', err.message);
+        if (isPlaying && sessionId === playbackSessionId) {
+            await new Promise(r => setTimeout(r, 500));
+            try {
+                audio.src = url;
+                await audio.play();
+                setPlayButtonState('pause');
+            } catch (e) {
+                console.error('Retry failed:', e.message);
+                // Skip chunk
+                currentChunkIndex++;
+                if (isPlaying) playChunk();
+                return;
+            }
+        }
+    }
+
+    // Start prefetching next chunks
+    prefetch(sessionId);
+}
+
+// --- Audio Events ---
+
+audio.addEventListener('ended', () => {
+    if (!isPlaying) return;
+    currentChunkIndex++;
+    playChunk();
 });
 
-// Load saved speed
-const savedSpeed = localStorage.getItem('novelReader_speed');
-if (savedSpeed) {
-    speedSelect.value = savedSpeed;
-    // applySpeed() will be called when we initialize audio or play, 
-    // but let's ensure base state is correct
+audio.addEventListener('error', (e) => {
+    const error = e.target.error;
+    console.error('Audio error:', error?.code, error?.message);
+
+    if (isPlaying) {
+        // Clear the bad cache entry and retry
+        audioMap.delete(currentChunkIndex);
+        setTimeout(() => {
+            if (isPlaying) playChunk();
+        }, 1000);
+    }
+});
+
+// ============================================
+// Public Controls
+// ============================================
+
+function playPause() {
+    if (isPlaying) {
+        // Pause
+        audio.pause();
+        isPlaying = false;
+        setPlayButtonState('play');
+    } else {
+        // Play
+        isPlaying = true;
+
+        // If we had paused mid-chunk and audio has a src, resume
+        if (audio.src && audio.paused && !audio.ended && chunks.length > 0) {
+            audio.play()
+                .then(() => setPlayButtonState('pause'))
+                .catch(() => playChunk());
+            return;
+        }
+
+        // Fresh start or no chunks yet
+        if (chunks.length === 0) {
+            const rawText = novelTextElem.value.trim();
+            if (!rawText) {
+                isPlaying = false;
+                setPlayButtonState('play');
+                return;
+            }
+            chunks = splitIntoChunks(rawText);
+            if (chunks.length === 0) {
+                isPlaying = false;
+                setPlayButtonState('play');
+                return;
+            }
+            currentChunkIndex = 0;
+            playbackSessionId++;
+            enterReaderMode();
+        }
+
+        playChunk();
+    }
 }
 
-// Load AI voices from backend
+function stopReading() {
+    isPlaying = false;
+    playbackSessionId++;
+
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load(); // Reset the audio element
+
+    clearAllCache();
+    currentChunkIndex = 0;
+    chunks = [];
+
+    exitReaderMode();
+    setPlayButtonState('play');
+    updateProgress();
+}
+
+function skipForward() {
+    if (chunks.length === 0) return;
+    if (currentChunkIndex >= chunks.length - 1) return;
+
+    audio.pause();
+    currentChunkIndex++;
+
+    if (isPlaying) {
+        playChunk();
+    } else {
+        updateProgress();
+        highlightChunk(currentChunkIndex);
+    }
+}
+
+function skipBack() {
+    if (chunks.length === 0) return;
+    if (currentChunkIndex <= 0) return;
+
+    audio.pause();
+    currentChunkIndex--;
+
+    if (isPlaying) {
+        playChunk();
+    } else {
+        updateProgress();
+        highlightChunk(currentChunkIndex);
+    }
+}
+
+async function pasteText() {
+    try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+            if (novelTextElem.value) {
+                novelTextElem.value = novelTextElem.value + '\n' + text;
+            } else {
+                novelTextElem.value = text;
+            }
+            novelTextElem.dispatchEvent(new Event('input'));
+            novelTextElem.focus();
+        }
+    } catch (err) {
+        console.warn('Clipboard read failed:', err);
+        // Fallback: focus the textarea so user can Ctrl+V
+        novelTextElem.focus();
+    }
+}
+
+function clearText() {
+    if (isPlaying) stopReading();
+    novelTextElem.value = '';
+    localStorage.removeItem('novelReader_text');
+}
+
+// ============================================
+// Voice Loading
+// ============================================
+
 async function loadVoices() {
     try {
         const response = await fetch(`${API_BASE}/voices`);
         const voices = await response.json();
         voiceSelect.innerHTML = voices
-            .map(voice => `<option value="${voice.ShortName}">${voice.FriendlyName}</option>`)
+            .map(v => `<option value="${v.ShortName}">${v.FriendlyName}</option>`)
             .join('');
 
-        // Restore saved voice
         const savedVoice = localStorage.getItem('novelReader_voice');
         if (savedVoice) {
-            // Check if voice exists in the new list (it might be a different browser/environment or voice removed)
             const exists = voices.find(v => v.ShortName === savedVoice);
-            if (exists) {
-                voiceSelect.value = savedVoice;
-            }
+            if (exists) voiceSelect.value = savedVoice;
         }
     } catch (error) {
         console.error('Error loading voices:', error);
@@ -72,378 +489,211 @@ async function loadVoices() {
     }
 }
 
-loadVoices();
+// ============================================
+// Event Listeners
+// ============================================
 
-function splitIntoChunks(text) {
-    return text.split(/\n+/).filter(chunk => chunk.trim().length > 0);
-}
-
-function updateProgress() {
-    if (chunks.length === 0) {
-        progressBar.style.width = '0%';
-        percentageText.textContent = '0%';
-        progressText.textContent = 'Not started';
-        return;
-    }
-    const percentage = Math.round((currentChunkIndex / chunks.length) * 100);
-    progressBar.style.width = `${percentage}%`;
-    percentageText.textContent = `${percentage}%`;
-    progressText.textContent = `Reading chunk ${currentChunkIndex + 1} of ${chunks.length}`;
-}
-
-function clearCache() {
-    chunkCache.forEach((url) => {
-        if (url && url !== 'fetching') URL.revokeObjectURL(url);
-    });
-    chunkCache.clear();
-}
-
-async function fetchNovelContent(url) {
-    if (!url) return;
-
-    const selector = document.getElementById('customSelector').value.trim();
-
-    // Stop audio immediately when starting a fetch
-    if (isPlaying) {
-        audioA.pause();
-        audioB.pause();
-        isPlaying = false;
-        playIcon.classList.remove('hidden');
-        pauseIcon.classList.add('hidden');
-    }
-
-    // Show loading in button 
-    fetchBtn.classList.add('animate-pulse', 'text-indigo-600');
-
-    try {
-        const response = await fetch(`${API_BASE}/fetch-novel`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, selector })
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || 'Failed to fetch novel');
-        }
-
-        const data = await response.json();
-        if (data.text) {
-            stopReading(); // Reset state
-            novelTextElem.value = data.text;
-            // Auto-play
-            playPause();
-        }
-    } catch (error) {
-        console.error('Fetch error:', error);
-        alert(`Error: ${error.message}`);
-    } finally {
-        fetchBtn.classList.remove('animate-pulse', 'text-indigo-600');
-    }
-}
-
-function navigateToChapter(direction) {
-    const url = novelUrlInput.value.trim();
-    if (!url) return;
-
-    // Simple regex to find the chapter number at the end
-    const regex = /(chapter-)(\d+)(\/?)$/i;
-    const match = url.match(regex);
-
-    if (match) {
-        const prefix = match[1];
-        const currentNum = parseInt(match[2]);
-        const suffix = match[3] || '';
-        const newNum = direction === 'next' ? currentNum + 1 : Math.max(1, currentNum - 1);
-        const newUrl = url.replace(regex, `${prefix}${newNum}${suffix}`);
-
-        novelUrlInput.value = newUrl;
-        fetchNovelContent(newUrl);
-    } else {
-        alert('Could not detect chapter number in URL. Use a link like .../chapter-113');
-    }
-}
-
-async function fetchChunk(index) {
-    if (index >= chunks.length) return null;
-
-    // 1. Check completed cache
-    if (chunkCache.has(index)) return chunkCache.get(index);
-
-    // 2. Check ongoing request
-    if (fetchPromises.has(index)) return await fetchPromises.get(index);
-
-    // 3. Start new request
-    const fetchOp = (async () => {
-        const text = chunks[index];
-        const voice = voiceSelect.value;
-        try {
-            const response = await fetch(`${API_BASE}/tts`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text, voice })
-            });
-
-            if (!response.ok) throw new Error('TTS fetch failed');
-
-            const blob = await response.blob();
-
-            // Check stale voice
-            if (voiceSelect.value !== voice) return null;
-
-            const url = URL.createObjectURL(blob);
-            chunkCache.set(index, url);
-            return url;
-        } catch (error) {
-            console.error(`Error fetching chunk ${index}:`, error);
-            // Don't auto-retry recursively here to avoid spam, just return null
-            return null;
-        } finally {
-            fetchPromises.delete(index);
-        }
-    })();
-
-    fetchPromises.set(index, fetchOp);
-    return await fetchOp;
-}
-
-async function prefetchNext() {
-    for (let i = 1; i <= PREFETCH_COUNT; i++) {
-        const nextIndex = currentChunkIndex + i;
-        if (nextIndex < chunks.length && !chunkCache.has(nextIndex)) {
-            fetchChunk(nextIndex);
-        }
-    }
-
-    // PRIME THE OFFLOAD PLAYER
-    // This is the key to low latency: load the NEXT chunk into the inactive audio player
-    const nextUrl = chunkCache.get(currentChunkIndex + 1);
-    const inactiveAudio = activeAudio === audioA ? audioB : audioA;
-
-    // Only set if we have a valid URL and it's not already set
-    if (nextUrl && nextUrl !== 'fetching' && inactiveAudio.src !== nextUrl) {
-        inactiveAudio.src = nextUrl;
-        inactiveAudio.playbackRate = parseFloat(speedSelect.value);
-        // Browser will now decode header/metadata in background
-    }
-}
-
-async function playChunk() {
-    if (!isPlaying) return;
-
-    if (currentChunkIndex >= chunks.length) {
-        stopReading();
-        return;
-    }
-
-    try {
-        updateProgress();
-
-        // Highlight and scroll
-        document.querySelectorAll('.chunk').forEach(el => el.classList.remove('highlight'));
-        const activeSpan = document.getElementById(`chunk-${currentChunkIndex}`);
-        if (activeSpan) {
-            activeSpan.classList.add('highlight');
-            activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-
-        let url = chunkCache.get(currentChunkIndex);
-
-        // If not in cache, must fetch
-        if (!url) {
-            playIcon.classList.add('hidden');
-            pauseIcon.classList.add('hidden');
-            loadingIcon.classList.remove('hidden');
-
-            const fetchingVoice = voiceSelect.value;
-            url = await fetchChunk(currentChunkIndex);
-
-            // If voice changed during fetch, abort this playback attempt
-            if (voiceSelect.value !== fetchingVoice) return;
-
-            if (!url) throw new Error('Failed to get chunk URL');
-        }
-
-        if (!isPlaying) return; // User might have paused while fetching
-
-        // PING-PONG LOGIC
-        let targetAudio = activeAudio;
-        const inactiveAudio = activeAudio === audioA ? audioB : audioA;
-
-        if (inactiveAudio.src === url) {
-            // Hot swap!
-            targetAudio = inactiveAudio;
-            activeAudio = targetAudio; // Swap global reference
-        } else {
-            // Cold start or jump
-            targetAudio.src = url;
-            targetAudio.load(); // Ensure new src is acknowledged
-        }
-
-        applySpeed();
-
-        try {
-            await targetAudio.play();
-        } catch (e) {
-            console.warn("Autoplay blocked or playback error, retrying", e);
-            targetAudio.src = url;
-            await targetAudio.play();
-        }
-
-        loadingIcon.classList.add('hidden');
-        pauseIcon.classList.remove('hidden');
-
-        // Start prefetching next chunks
-        prefetchNext();
-
-    } catch (error) {
-        console.error('Playback error:', error);
-        if (isPlaying) {
-            console.log("Retrying current chunk in 2s...");
-            // DO NOT SKIP. Retry the same chunk.
-            await new Promise(r => setTimeout(r, 2000));
-            playChunk();
-        }
-    }
-}
-
-function handleAudioEnd() {
-    if (isPlaying) {
-        // Cleanup current chunk from cache to save memory
-        const oldUrl = chunkCache.get(currentChunkIndex);
-        // Don't revoke immediately if we want to allow backtracking, 
-        // but for memory safety with many chunks we should eventually.
-        // For ping-pong we need to be careful not to revoke what just finished 
-        // if we intend to replay it, but here we move forward.
-
-        // We defer revocation slightly or keep a small LRU, but for now strict cleanup:
-        if (oldUrl && oldUrl !== 'fetching') {
-            // We can check if any audio player currently holds this src before revoking?
-            // Actually unsafe to revoke if it's currently assigned to a player tag that hasn't unloaded it.
-            // Safer to just let garbage collection handle blobs or use a slightly larger cache window.
-            // For this simple app, we can just not revoke explicitly or revoke chunks < current - 5
-        }
-
-        currentChunkIndex++;
-        playChunk();
-    }
-}
-
-// Attach listeners to BOTH players
-audioA.onended = handleAudioEnd;
-audioB.onended = handleAudioEnd;
-
-function playPause() {
-    if (isPlaying) {
-        audioA.pause();
-        audioB.pause();
-        isPlaying = false;
-        playIcon.classList.remove('hidden');
-        pauseIcon.classList.add('hidden');
-        loadingIcon.classList.add('hidden');
-    } else {
-        isPlaying = true;
-        playIcon.classList.add('hidden');
-        pauseIcon.classList.remove('hidden');
-
-        const currentPlayer = activeAudio;
-        if (currentPlayer.src && currentPlayer.paused && currentChunkIndex < chunks.length) {
-            currentPlayer.play().catch(() => playChunk());
-        } else {
-            if (chunks.length === 0) {
-                const rawText = novelTextElem.value;
-                chunks = splitIntoChunks(rawText);
-
-                // Switch to Reader Mode
-                if (chunks.length > 0) {
-                    novelTextElem.classList.add('hidden');
-                    readerView.classList.remove('hidden');
-                    readerView.innerHTML = chunks.map((text, i) =>
-                        `<span id="chunk-${i}" class="chunk">${text}</span>`
-                    ).join('<br><br>');
-                }
-            }
-            if (chunks.length === 0) {
-                isPlaying = false;
-                playIcon.classList.remove('hidden');
-                pauseIcon.classList.add('hidden');
-                return;
-            }
-            playChunk();
-        }
-    }
-}
-
-function stopReading() {
-    isPlaying = false;
-    audioA.pause();
-    audioB.pause();
-    audioA.src = '';
-    audioB.src = '';
-
-    clearCache();
-    currentChunkIndex = 0;
-    chunks = [];
-
-    // Switch back to Editor Mode
-    readerView.classList.add('hidden');
-    novelTextElem.classList.remove('hidden');
-
-    playIcon.classList.remove('hidden');
-    pauseIcon.classList.add('hidden');
-    loadingIcon.classList.add('hidden');
-    updateProgress();
-}
+// Playback controls
 playBtn.addEventListener('click', playPause);
 stopBtn.addEventListener('click', stopReading);
+skipForwardBtn.addEventListener('click', skipForward);
+skipBackBtn.addEventListener('click', skipBack);
 
-// New features event listeners
-fetchBtn.addEventListener('click', () => fetchNovelContent(novelUrlInput.value.trim()));
-nextBtn.addEventListener('click', () => navigateToChapter('next'));
-prevBtn.addEventListener('click', () => navigateToChapter('prev'));
+// Text actions
+pasteBtn.addEventListener('click', pasteText);
+clearBtn.addEventListener('click', clearText);
 
-document.getElementById('toggleAdvanced').addEventListener('click', () => {
-    document.getElementById('advancedPanel').classList.toggle('hidden');
+// Auto-Scroll Toggle
+autoScrollToggle.addEventListener('click', () => {
+    isAutoScrollEnabled = !isAutoScrollEnabled;
+    autoScrollToggle.textContent = `Scroll: ${isAutoScrollEnabled ? 'ON' : 'OFF'}`;
+    modalScrollToggle.textContent = isAutoScrollEnabled ? 'ON' : 'OFF';
+    localStorage.setItem('novelReader_autoScroll', isAutoScrollEnabled);
 });
 
-novelUrlInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') fetchNovelContent(novelUrlInput.value.trim());
+// Settings Modal Controls
+settingsBtn.addEventListener('click', () => {
+    settingsModal.classList.remove('hidden');
 });
 
-// Click-to-play feature
-readerView.addEventListener('click', (e) => {
-    if (e.target.classList.contains('chunk')) {
-        const index = parseInt(e.target.id.replace('chunk-', ''));
-        if (!isNaN(index)) {
-            // Stop both before jumping
-            audioA.pause();
-            audioB.pause();
+modalCloseBtn.addEventListener('click', () => {
+    settingsModal.classList.add('hidden');
+});
 
-            currentChunkIndex = index;
-            if (!isPlaying) {
-                playPause(); // Starts playback
-            } else {
-                playChunk(); // Jumps to new chunk
-            }
-        }
+// Close modal when clicking outside
+settingsModal.addEventListener('click', (e) => {
+    if (e.target === settingsModal) {
+        settingsModal.classList.add('hidden');
     }
 });
 
+modalScrollToggle.addEventListener('click', () => {
+    isAutoScrollEnabled = !isAutoScrollEnabled;
+    autoScrollToggle.textContent = `Scroll: ${isAutoScrollEnabled ? 'ON' : 'OFF'}`;
+    modalScrollToggle.textContent = isAutoScrollEnabled ? 'ON' : 'OFF';
+    localStorage.setItem('novelReader_autoScroll', isAutoScrollEnabled);
+});
+
+modalSpeedSelect.addEventListener('change', () => {
+    speedSelect.value = modalSpeedSelect.value;
+    speedSelect.dispatchEvent(new Event('change'));
+});
+
+modalVoiceSelect.addEventListener('change', () => {
+    voiceSelect.value = modalVoiceSelect.value;
+    voiceSelect.dispatchEvent(new Event('change'));
+});
+
+textSizeRange.addEventListener('input', () => {
+    const size = textSizeRange.value;
+    novelTextElem.style.fontSize = `${size}rem`;
+    readerView.style.fontSize = `${size}rem`;
+    localStorage.setItem('novelReader_textSize', size);
+});
+
+textColorPicker.addEventListener('input', () => {
+    const color = textColorPicker.value;
+    novelTextElem.style.color = color;
+    readerView.style.color = color;
+    localStorage.setItem('novelReader_textColor', color);
+});
+
+textOpacityRange.addEventListener('input', () => {
+    const opacity = textOpacityRange.value;
+    novelTextElem.style.opacity = opacity;
+    readerView.style.opacity = opacity;
+    localStorage.setItem('novelReader_textOpacity', opacity);
+});
+
+// Speed change
+speedSelect.addEventListener('change', () => {
+    audio.playbackRate = parseFloat(speedSelect.value);
+    localStorage.setItem('novelReader_speed', speedSelect.value);
+});
+
+// Voice change
 voiceSelect.addEventListener('change', () => {
+    localStorage.setItem('novelReader_voice', voiceSelect.value);
+
     if (chunks.length === 0) return;
 
-    audioA.pause();
-    audioB.pause();
-    clearCache();
+    // Re-generate audio from current chunk with new voice
+    audio.pause();
+    clearAllCache();
+    playbackSessionId++;
 
-    // Force play mode if we have content
     isPlaying = true;
-    playIcon.classList.add('hidden');
-    pauseIcon.classList.remove('hidden');
-    loadingIcon.classList.add('hidden');
-
+    setPlayButtonState('pause');
     playChunk();
-
-    // Save selection
-    localStorage.setItem('novelReader_voice', voiceSelect.value);
 });
+
+// Save text on change
+novelTextElem.addEventListener('input', () => {
+    localStorage.setItem('novelReader_text', novelTextElem.value);
+});
+
+// Click-to-jump in reader view
+readerView.addEventListener('click', (e) => {
+    const chunkEl = e.target.closest('.chunk');
+    if (!chunkEl) return;
+
+    const index = parseInt(chunkEl.id.replace('chunk-', ''));
+    if (isNaN(index) || index < 0 || index >= chunks.length) return;
+
+    audio.pause();
+    currentChunkIndex = index;
+
+    // Clear played state for chunks after the jumped-to position
+    for (let i = index; i < chunks.length; i++) {
+        const el = document.getElementById(`chunk-${i}`);
+        if (el) el.classList.remove('played');
+    }
+
+    if (!isPlaying) {
+        playPause();
+    } else {
+        playChunk();
+    }
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+    // Don't capture when typing in the textarea
+    if (document.activeElement === novelTextElem) return;
+
+    switch (e.code) {
+        case 'Space':
+            e.preventDefault();
+            playPause();
+            break;
+        case 'Escape':
+            e.preventDefault();
+            stopReading();
+            break;
+        case 'ArrowRight':
+            e.preventDefault();
+            skipForward();
+            break;
+        case 'ArrowLeft':
+            e.preventDefault();
+            skipBack();
+            break;
+    }
+});
+
+// ============================================
+// Initialization
+// ============================================
+
+// Restore saved text and settings
+window.addEventListener('load', () => {
+    const savedText = localStorage.getItem('novelReader_text');
+    if (savedText) novelTextElem.value = savedText;
+
+    // Text size
+    const savedSize = localStorage.getItem('novelReader_textSize') || '1';
+    textSizeRange.value = savedSize;
+    novelTextElem.style.fontSize = `${savedSize}rem`;
+    readerView.style.fontSize = `${savedSize}rem`;
+
+    // Text color
+    const savedColor = localStorage.getItem('novelReader_textColor') || '#e2e8f0';
+    textColorPicker.value = savedColor;
+    novelTextElem.style.color = savedColor;
+    readerView.style.color = savedColor;
+
+    // Text opacity
+    const savedOpacity = localStorage.getItem('novelReader_textOpacity') || '1';
+    textOpacityRange.value = savedOpacity;
+    novelTextElem.style.opacity = savedOpacity;
+    readerView.style.opacity = savedOpacity;
+
+    // Modal scroll toggle sync
+    modalScrollToggle.textContent = isAutoScrollEnabled ? 'ON' : 'OFF';
+});
+
+// Restore saved speed
+const savedSpeed = localStorage.getItem('novelReader_speed');
+if (savedSpeed) {
+    speedSelect.value = savedSpeed;
+    modalSpeedSelect.value = savedSpeed;
+}
+
+// Restore saved auto-scroll preference
+const savedAutoScroll = localStorage.getItem('novelReader_autoScroll');
+if (savedAutoScroll !== null) {
+    isAutoScrollEnabled = savedAutoScroll === 'true';
+    autoScrollToggle.textContent = `Scroll: ${isAutoScrollEnabled ? 'ON' : 'OFF'}`;
+}
+
+// Load voices and duplicate into modal voice select
+loadVoices().then(() => {
+    // After voices loaded, copy options to modal select
+    modalVoiceSelect.innerHTML = voiceSelect.innerHTML;
+    // Set modal voice to saved value if any
+    const savedVoice = localStorage.getItem('novelReader_voice');
+    if (savedVoice) modalVoiceSelect.value = savedVoice;
+});
+
+// Initial UI updates remain
+updateProgress();
