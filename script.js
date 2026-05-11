@@ -451,6 +451,8 @@ async function pasteText() {
                 novelTextElem.value = text;
             }
             novelTextElem.dispatchEvent(new Event('input'));
+            novelTextElem.scrollTop = novelTextElem.scrollHeight;
+            novelTextElem.blur();
         }
     } catch (err) {
         console.warn('Clipboard read failed:', err);
