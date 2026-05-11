@@ -451,7 +451,6 @@ async function pasteText() {
                 novelTextElem.value = text;
             }
             novelTextElem.dispatchEvent(new Event('input'));
-            novelTextElem.focus();
         }
     } catch (err) {
         console.warn('Clipboard read failed:', err);

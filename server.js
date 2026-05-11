@@ -89,11 +89,18 @@ app.get('/api/voices', async (req, res) => {
 
 // Stream TTS audio
 app.post('/api/tts', async (req, res) => {
-    const { text, voice } = req.body;
+    let { text, voice } = req.body;
 
     if (!text) {
         return res.status(400).json({ error: 'Text is required' });
     }
+
+    // Sanitize text: replace &nbsp; with space, remove other HTML entities and tags
+    text = text
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&[a-zA-Z0-9#]+;/g, ' ') // Replace other HTML entities with space
+        .replace(/<[^>]*>?/gm, '') // Remove HTML tags
+        .trim();
 
     try {
         const voiceName = voice || 'en-US-AndrewNeural';
